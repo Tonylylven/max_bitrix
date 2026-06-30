@@ -68,23 +68,40 @@ async function reply(ctx, text) {
 }
 
 // ===== БИТРИКС =====
-async function createBitrixTask(title, description) {
+async function createBitrixTask(baseTitle, description) {
     try {
+        // 1. Создаем задачу с базовым заголовком
         const response = await axios.post(`${CONFIG.BITRIX_WEBHOOK_URL}tasks.task.add`, {
             fields: {
-                TITLE: title,
+                TITLE: baseTitle,
                 DESCRIPTION: description || 'Нет описания',
                 RESPONSIBLE_ID: CONFIG.BITRIX_RESPONSIBLE_ID,
                 ACCOMPLICES: CONFIG.BITRIX_ACCOMPLICES
             }
         }, { timeout: 15000 });
         
-        console.log('✅ Задача создана в Битрикс24');
-        
-        // Достаем ID созданной задачи из ответа Битрикс
         const taskId = response.data?.result?.task?.id; 
+
+        if (!taskId) {
+            throw new Error('Не удалось получить ID созданной задачи от Битрикс24');
+        }
+
+        console.log(`✅ Задача №${taskId} создана в Битрикс24. Обновляем заголовок...`);
+
+        // 2. Формируем финальный заголовок с ID в начале
+        const finalTitle = `№${taskId} - ${baseTitle}`;
+
+        // 3. Обновляем заголовок задачи в Битриксе
+        await axios.post(`${CONFIG.BITRIX_WEBHOOK_URL}tasks.task.update`, {
+            taskId: taskId,
+            fields: {
+                TITLE: finalTitle
+            }
+        }, { timeout: 10000 });
+
+        console.log(`✅ Заголовок задачи №${taskId} успешно изменен в CRM`);
         
-        return { success: true, taskId: taskId };
+        return { success: true, taskId: taskId, finalTitle: finalTitle };
     } catch (error) {
         console.error('❌ Битрикс ошибка:', error.message);
         return { success: false, error: error.message };
@@ -144,7 +161,7 @@ bot.on('message_created', async (ctx) => {
 
         console.log(`📥 Получено от ${userId} [Этап: ${session.step}]: "${text}"`);
 
-// --- ШАГ 1: ЗАГОЛОВОК ---
+        // --- ШАГ 1: ЗАГОЛОВОК ---
         if (session.step === 'awaiting_title') {
             if (!isValidString(text, 3)) {
                 await reply(ctx, '❌ Заголовок слишком короткий. Должно быть минимум 3 символа. Попробуйте ещё раз:');
@@ -214,11 +231,11 @@ bot.on('message_created', async (ctx) => {
                 firstname: session.firstname,
                 middlename: middlename
             });
-            await reply(ctx, '✅ Отчество принято.\n\n**Шаг 6:** Введите номер кабинета (например, 104):');
+            await reply(ctx, '✅ Отчество принято.\n\n**Шаг 6:** Введите номер кабинета (например, 205):');
             return;
         }
 
-// --- ШАГ 6: КАБИНЕТ И СОЗДАНИЕ ---
+        // --- ШАГ 6: КАБИНЕТ И СОЗДАНИЕ ---
         if (session.step === 'awaiting_cabinet') {
             const cabinetNum = parseInt(text, 10);
 
@@ -234,15 +251,15 @@ bot.on('message_created', async (ctx) => {
 
             // Красиво собираем ФИО, убирая лишние пробелы, если отчество отсутствует
             const fullName = `${session.lastname} ${session.firstname} ${session.middlename}`.trim().replace(/\s+/g, ' ');
-            const fullTitle = `${fullName} (каб. ${cabinetNum}): ${session.title}`;
+            const baseTitle = `${fullName} (каб. ${cabinetNum}): ${session.title}`;
             
             await reply(ctx, '⏳ Отправляю в Битрикс24...');
             
-            const result = await createBitrixTask(fullTitle, session.description);
+            // Запускаем процесс создания и последующего обновления заголовка
+            const result = await createBitrixTask(baseTitle, session.description);
             
             if (result.success) {
-                const taskIdStr = result.taskId ? ` №${result.taskId}` : '';
-                await reply(ctx, `✅ **Задача${taskIdStr} успешно создана!**\n\nВы поставлены в очередь на выполнение. Специалист уже уведомлен и скоро займется вашим вопросом.\n\n📌 *${fullTitle}*`);
+                await reply(ctx, `✅ **Задача №${result.taskId} успешно создана!**\n\nВы поставлены в очередь на выполнение. Специалист уже уведомлен и скоро займется вашим вопросом.\n\n📌 *${result.finalTitle}*`);
             } else {
                 await reply(ctx, `❌ Ошибка Битрикс24: ${result.error}`);
             }
@@ -255,7 +272,7 @@ bot.on('message_created', async (ctx) => {
         } catch (e) {}
         resetSession(userId);
     } finally {
-        processingUsers.delete(userId); // Всегда освобождаем блокировку пользователя
+        processingUsers.delete(userId); // Освобождаем блокировку пользователя
     }
 });
 
