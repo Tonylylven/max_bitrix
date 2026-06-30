@@ -70,7 +70,7 @@ async function reply(ctx, text) {
 // ===== БИТРИКС =====
 async function createBitrixTask(title, description) {
     try {
-        await axios.post(`${CONFIG.BITRIX_WEBHOOK_URL}tasks.task.add`, {
+        const response = await axios.post(`${CONFIG.BITRIX_WEBHOOK_URL}tasks.task.add`, {
             fields: {
                 TITLE: title,
                 DESCRIPTION: description || 'Нет описания',
@@ -78,8 +78,13 @@ async function createBitrixTask(title, description) {
                 ACCOMPLICES: CONFIG.BITRIX_ACCOMPLICES
             }
         }, { timeout: 15000 });
+        
         console.log('✅ Задача создана в Битрикс24');
-        return { success: true };
+        
+        // Достаем ID созданной задачи из ответа Битрикс
+        const taskId = response.data?.result?.task?.id; 
+        
+        return { success: true, taskId: taskId };
     } catch (error) {
         console.error('❌ Битрикс ошибка:', error.message);
         return { success: false, error: error.message };
@@ -139,7 +144,7 @@ bot.on('message_created', async (ctx) => {
 
         console.log(`📥 Получено от ${userId} [Этап: ${session.step}]: "${text}"`);
 
-        // --- ШАГ 1: ЗАГОЛОВОК ---
+// --- ШАГ 1: ЗАГОЛОВОК ---
         if (session.step === 'awaiting_title') {
             if (!isValidString(text, 3)) {
                 await reply(ctx, '❌ Заголовок слишком короткий. Должно быть минимум 3 символа. Попробуйте ещё раз:');
@@ -156,39 +161,88 @@ bot.on('message_created', async (ctx) => {
                 await reply(ctx, '❌ Описание не может быть пустым. Пожалуйста, укажите детали:');
                 return;
             }
-            setSession(userId, 'awaiting_fullname', { title: session.title, description: text });
-            await reply(ctx, '✅ Описание принято.\n\n**Шаг 3:** Введите ваше ФИО (мин. 3 символа).');
+            setSession(userId, 'awaiting_lastname', { title: session.title, description: text });
+            await reply(ctx, '✅ Описание принято.\n\n**Шаг 3:** Введите вашу **Фамилию**:');
             return;
         }
 
-        // --- ШАГ 3: ФИО ---
-        if (session.step === 'awaiting_fullname') {
-            if (!isValidString(text, 3)) {
-                await reply(ctx, '❌ ФИО указано некорректно (мин. 3 символа). Попробуйте ещё раз:');
+        // --- ШАГ 3: ФАМИЛИЯ ---
+        if (session.step === 'awaiting_lastname') {
+            if (!isValidString(text, 2)) {
+                await reply(ctx, '❌ Фамилия слишком короткая. Попробуйте ещё раз:');
                 return;
             }
+            setSession(userId, 'awaiting_firstname', { 
+                title: session.title, 
+                description: session.description, 
+                lastname: text 
+            });
+            await reply(ctx, '✅ Фамилия принята.\n\n**Шаг 4:** Введите ваше **Имя**:');
+            return;
+        }
+
+        // --- ШАГ 4: ИМЯ ---
+        if (session.step === 'awaiting_firstname') {
+            if (!isValidString(text, 2)) {
+                await reply(ctx, '❌ Имя слишком короткое. Попробуйте ещё раз:');
+                return;
+            }
+            setSession(userId, 'awaiting_middlename', { 
+                title: session.title, 
+                description: session.description, 
+                lastname: session.lastname,
+                firstname: text 
+            });
+            await reply(ctx, '✅ Имя принято.\n\n**Шаг 5:** Введите ваше **Отчество** (если нет, поставьте прочерк "-"):');
+            return;
+        }
+
+        // --- ШАГ 5: ОТЧЕСТВО ---
+        if (session.step === 'awaiting_middlename') {
+            if (!isValidString(text, 1)) {
+                await reply(ctx, '❌ Отчество не может быть пустым. Попробуйте ещё раз (или введите "-"):');
+                return;
+            }
+            
+            // Если ввели прочерк, игнорируем его при сборке ФИО
+            const middlename = text === '-' ? '' : text;
+
             setSession(userId, 'awaiting_cabinet', { 
                 title: session.title, 
                 description: session.description, 
-                fullname: text 
+                lastname: session.lastname,
+                firstname: session.firstname,
+                middlename: middlename
             });
-            await reply(ctx, '✅ ФИО принято.\n\n**Шаг 4:** Введите номер кабинета (например, 104):');
+            await reply(ctx, '✅ Отчество принято.\n\n**Шаг 6:** Введите номер кабинета (например, 104):');
             return;
         }
 
-        // --- ШАГ 4: КАБИНЕТ И СОЗДАНИЕ ---
+// --- ШАГ 6: КАБИНЕТ И СОЗДАНИЕ ---
         if (session.step === 'awaiting_cabinet') {
-            if (!isValidString(text, 1)) {
-                await reply(ctx, '❌ Номер кабинета не может быть пустым. Укажите кабинет:');
+            const cabinetNum = parseInt(text, 10);
+
+            // Проверяем, что ввели число и оно входит в разрешенные диапазоны
+            const isValidCabinet = 
+                (!isNaN(cabinetNum)) && 
+                ((cabinetNum >= 201 && cabinetNum <= 212) || (cabinetNum >= 301 && cabinetNum <= 310));
+
+            if (!isValidCabinet) {
+                await reply(ctx, '❌ Такого кабинета не существует. Допустимые кабинеты: 201-212 и 301-310. Укажите корректный кабинет:');
                 return;
             }
 
-            const fullTitle = `${session.fullname} (каб. ${text}): ${session.title}`;
+            // Красиво собираем ФИО, убирая лишние пробелы, если отчество отсутствует
+            const fullName = `${session.lastname} ${session.firstname} ${session.middlename}`.trim().replace(/\s+/g, ' ');
+            const fullTitle = `${fullName} (каб. ${cabinetNum}): ${session.title}`;
+            
             await reply(ctx, '⏳ Отправляю в Битрикс24...');
             
             const result = await createBitrixTask(fullTitle, session.description);
+            
             if (result.success) {
-                await reply(ctx, `✅ **Задача создана!**\n\n📌 *${fullTitle}*\n\nОтветственный уведомлён.`);
+                const taskIdStr = result.taskId ? ` №${result.taskId}` : '';
+                await reply(ctx, `✅ **Задача${taskIdStr} успешно создана!**\n\nВы поставлены в очередь на выполнение. Специалист уже уведомлен и скоро займется вашим вопросом.\n\n📌 *${fullTitle}*`);
             } else {
                 await reply(ctx, `❌ Ошибка Битрикс24: ${result.error}`);
             }
@@ -250,7 +304,7 @@ async function startBot() {
 // Запускаем бота
 startBot();
 
-// ===== ЗАЩИТА ОТ КРИТИЧЕСКИХ ПАДЕНИЙ (АНТИ-КРАШ) =====
+// ===== ЗАЩИТА ОТ КРИТИЧЕСКИХ ПАДЕНИЙ =====
 process.on('unhandledRejection', (reason, promise) => {
     console.error('⚠️ Критическая ошибка (Unhandled Rejection):', reason);
 });
